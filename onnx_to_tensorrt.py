@@ -69,8 +69,6 @@ def parse_args():
                         default=None, type=int)
     parser.add_argument('--input_img', dest='input_img', help="the path of input_img",
                         default=None, type=str)
-    parser.add_argument('--result', dest='result', help="the path of trt file",
-                        default="output/result.trt", type=str)
     
     if len(sys.argv) == 1:
         parser.print_help()
@@ -177,8 +175,7 @@ def main():
     width, height, masks, anchors = parse_cfg_wh(cfg_file_path)
     # Try to load a previously generated YOLOv3 network graph in ONNX format:
     onnx_file_path = args.onnx
-    engine_file_path = args.result
-    # engine_file_path = onnx_file_path.replace(".onnx", '.trt')
+    engine_file_path = onnx_file_path.replace(".onnx", '.trt')
     print("engine_path", engine_file_path)
     print(onnx.checker.check_model(onnx_file_path))
 
