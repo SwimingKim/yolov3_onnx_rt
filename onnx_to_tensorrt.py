@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 #
 # Copyright 1993-2019 NVIDIA Corporation.  All rights reserved.
 #
@@ -69,6 +69,8 @@ def parse_args():
                         default=None, type=int)
     parser.add_argument('--input_img', dest='input_img', help="the path of input_img",
                         default=None, type=str)
+    parser.add_argument('--result', dest='result', help="the path of trt file",
+                        default="output/result.trt", type=str)
     
     if len(sys.argv) == 1:
         parser.print_help()
@@ -125,19 +127,19 @@ def draw_bboxes(image_raw, bboxes, confidences, categories, all_categories, bbox
 
     return image_raw
 
-def get_engine(onnx_file_path, engine_file_path=""):
+def get_engine(onnx_file_path, engine_file_path="", input_resolution_yolov3_wh=[]):
     """Attempts to load a serialized engine if available, otherwise builds a new TensorRT engine and saves it."""
     def build_engine():
         """Takes an ONNX file and creates a TensorRT engine to run inference with"""
         print("build engine")
-        with trt.Builder(TRT_LOGGER) as builder, builder.create_network() as network, trt.OnnxParser(network, TRT_LOGGER) as parser:
-            builder.max_workspace_size = 1 << 30 # 1GB
+        with trt.Builder(TRT_LOGGER) as builder, builder.create_network(common.EXPLICIT_BATCH) as network, builder.create_builder_config() as config, trt.OnnxParser(network, TRT_LOGGER) as parser, trt.Runtime(TRT_LOGGER) as runtime:
+            config.max_workspace_size = 1 << 28 # 256MiB
             builder.max_batch_size = 1
             print("fp16 :", builder.platform_has_fast_fp16)
             print("int8 :", builder.platform_has_fast_int8)
-            print(builder.fp16_mode)
-            builder.fp16_mode = True
-            print(builder.fp16_mode)
+            # print(builder.fp16_mode)
+            # builder.fp16_mode = True
+            # print(builder.fp16_mode)
             # Parse model file
             if not os.path.exists(onnx_file_path):
                 print('ONNX file {} not found, please run yolov3_to_onnx.py first to generate it.'.format(onnx_file_path))
@@ -145,13 +147,19 @@ def get_engine(onnx_file_path, engine_file_path=""):
             print('Loading ONNX file from path {}...'.format(onnx_file_path))
             with open(onnx_file_path, 'rb') as model:
                 print('Beginning ONNX file parsing')
-                parser.parse(model.read())
+                if not parser.parse(model.read()):
+                    print ('ERROR: Failed to parse the ONNX file.')
+                    for error in range(parser.num_errors):
+                        print (parser.get_error(error))
+                    return None
+            network.get_input(0).shape = [1, 3, input_resolution_yolov3_wh[0], input_resolution_yolov3_wh[1]] #temporary hard coding
             print('Completed parsing of ONNX file')
             print('Building an engine from file {}; this may take a while...'.format(onnx_file_path))
-            engine = builder.build_cuda_engine(network)
+            plan = builder.build_serialized_network(network, config)
+            engine = runtime.deserialize_cuda_engine(plan)
             print("Completed creating Engine")
             with open(engine_file_path, "wb") as f:
-                f.write(engine.serialize())
+                f.write(plan)
             return engine
 
     if os.path.exists(engine_file_path):
@@ -169,15 +177,17 @@ def main():
     width, height, masks, anchors = parse_cfg_wh(cfg_file_path)
     # Try to load a previously generated YOLOv3 network graph in ONNX format:
     onnx_file_path = args.onnx
-    engine_file_path = onnx_file_path.replace(".onnx", '.trt')
+    engine_file_path = args.result
+    # engine_file_path = onnx_file_path.replace(".onnx", '.trt')
+    print("engine_path", engine_file_path)
     print(onnx.checker.check_model(onnx_file_path))
 
     input_image_path = args.input_img
 
     # Two-dimensional tuple with the target network's (spatial) input resolution in HW ordered
-    input_resolution_yolov3_WH = (width, height)
+    input_resolution_yolov3_wh = (width, height)
     # Create a pre-processor object by specifying the required input resolution for YOLOv3
-    preprocessor = PreprocessYOLO(input_resolution_yolov3_WH)
+    preprocessor = PreprocessYOLO(input_resolution_yolov3_wh)
     # Load an image from the specified input path, and return it together with  a pre-processed version
     image = preprocessor.process(input_image_path)
     # Store the shape of the original input image in WH format, we will need it for later
@@ -194,21 +204,22 @@ def main():
                           "yolo_anchors": anchors,
                           "obj_threshold": 0.5,                                               # Threshold for object coverage, float value between 0 and 1
                           "nms_threshold": 0.3,                                               # Threshold for non-max suppression algorithm, float value between 0 and 1
-                          "yolo_input_resolution": input_resolution_yolov3_WH,
+                          "yolo_input_resolution": input_resolution_yolov3_wh,
                           "num_class": num_class}
 
     postprocessor = PostprocessYOLO(**postprocessor_args)
 
     # Do inference with TensorRT
     trt_outputs = []
-    with get_engine(onnx_file_path, engine_file_path) as engine, engine.create_execution_context() as context:
+    with get_engine(onnx_file_path, engine_file_path, input_resolution_yolov3_wh) as engine, engine.create_execution_context() as context:
+        print("allocating buffers")
         inputs, outputs, bindings, stream = common.allocate_buffers(engine)
         # Do inference
         print('Running inference on image {}...'.format(input_image_path))
         # Set host input to the image. The common.do_inference function will copy the input to the GPU before executing.
         start_time = time.time()
         inputs[0].host = image
-        trt_outputs = common.do_inference(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream)
+        trt_outputs = common.do_inference_v2(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream)
 
     print("infer : {}".format(time.time() - start_time))
     start_time = time.time()

@@ -28,7 +28,7 @@ try:
 except NameError:
     FileNotFoundError = IOError
 
-#EXPLICIT_BATCH = 1 << (int)(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+EXPLICIT_BATCH = 1 << (int)(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
 
 
 def GiB(val):
